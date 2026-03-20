@@ -1,0 +1,130 @@
+# azure-pipelines.yml
+# SUEZ AI HR Agent — CI/CD Pipeline
+# Builds Docker image → pushes to Azure Container Registry → deploys to Kamatera VM via SSH
+
+trigger:
+  branches:
+    include:
+      - main          # auto-deploy on every push to main
+  paths:
+    exclude:
+      - README.md
+      - docs/**
+
+variables:
+  # ── Azure Container Registry ───────────────────────────────────────────────
+  ACR_NAME:          'suezhr'                         # your ACR name (no .azurecr.io)
+  ACR_LOGIN_SERVER:  'suezhr.azurecr.io'
+  IMAGE_NAME:        'hr-agent'
+  IMAGE_TAG:         '$(Build.BuildId)'
+  IMAGE_LATEST:      '$(ACR_LOGIN_SERVER)/$(IMAGE_NAME):latest'
+  IMAGE_VERSIONED:   '$(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(IMAGE_TAG)'
+
+  # ── Kamatera Server ────────────────────────────────────────────────────────
+  KAMATERA_HOST:     'YOUR_KAMATERA_IP'               # ← replace with your server IP
+  KAMATERA_USER:     'root'                           # or your deploy user
+  DEPLOY_PORT:       '5000'
+  CONTAINER_NAME:    'hr-agent'
+
+stages:
+
+# ════════════════════════════════════════════════════════════════════════
+# STAGE 1 — Build & Push Docker image to Azure Container Registry
+# ════════════════════════════════════════════════════════════════════════
+- stage: Build
+  displayName: 'Build & Push Docker Image'
+  jobs:
+  - job: BuildAndPush
+    displayName: 'Docker Build → ACR'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+
+    - task: Docker@2
+      displayName: 'Login to ACR'
+      inputs:
+        command:             login
+        containerRegistry:   'AzureContainerRegistry'   # Service connection name (set in Azure DevOps)
+
+    - task: Docker@2
+      displayName: 'Build Docker image'
+      inputs:
+        command:             build
+        repository:          '$(ACR_LOGIN_SERVER)/$(IMAGE_NAME)'
+        dockerfile:          '$(Build.SourcesDirectory)/Dockerfile'
+        tags:                |
+          $(IMAGE_TAG)
+          latest
+
+    - task: Docker@2
+      displayName: 'Push image to ACR'
+      inputs:
+        command:             push
+        repository:          '$(ACR_LOGIN_SERVER)/$(IMAGE_NAME)'
+        tags:                |
+          $(IMAGE_TAG)
+          latest
+
+    - script: |
+        echo "##vso[task.setvariable variable=IMAGE_VERSIONED;isOutput=true]$(IMAGE_VERSIONED)"
+      name: setImageVar
+      displayName: 'Export image tag'
+
+
+# ════════════════════════════════════════════════════════════════════════
+# STAGE 2 — Deploy to Kamatera VM via SSH
+# ════════════════════════════════════════════════════════════════════════
+- stage: Deploy
+  displayName: 'Deploy to Kamatera'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - deployment: DeployToKamatera
+    displayName: 'SSH Deploy → Kamatera'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - task: SSH@0
+            displayName: 'Pull & restart container on Kamatera'
+            inputs:
+              sshEndpoint:      'KamateraSSH'           # Service connection name (set in Azure DevOps)
+              runOptions:       'inline'
+              inline:           |
+                set -e
+
+                echo "=== Logging in to ACR ==="
+                docker login $(ACR_LOGIN_SERVER) \
+                  -u $ACR_USERNAME \
+                  -p $ACR_PASSWORD
+
+                echo "=== Pulling latest image ==="
+                docker pull $(IMAGE_LATEST)
+
+                echo "=== Stopping old container (if running) ==="
+                docker stop $(CONTAINER_NAME) || true
+                docker rm   $(CONTAINER_NAME) || true
+
+                echo "=== Starting new container ==="
+                docker run -d \
+                  --name $(CONTAINER_NAME) \
+                  --restart unless-stopped \
+                  -p $(DEPLOY_PORT):5000 \
+                  -e GROQ_API_KEY="$GROQ_API_KEY" \
+                  -e GROQ_MODEL="$GROQ_MODEL" \
+                  -e SUPABASE_URL="$SUPABASE_URL" \
+                  -e SUPABASE_KEY="$SUPABASE_KEY" \
+                  $(IMAGE_LATEST)
+
+                echo "=== Waiting for health check ==="
+                sleep 5
+                curl -sf http://localhost:$(DEPLOY_PORT)/health && echo "✓ Health OK" || echo "✗ Health check failed"
+
+                echo "=== Cleaning up old images ==="
+                docker image prune -f
+
+              failOnStdErr:     false

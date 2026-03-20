@@ -4,9 +4,6 @@ Fixed for:
   1. Windows Python 3.8 asyncio threading issue
   2. Field name mismatch (snake_case → Title Case for frontend)
   3. Results pushed directly to Supabase hr_results (no local OUTPUT folder)
-  4. FIX: previous_employer / previous_designation properly captured & mapped
-  5. FIX: current_location field added
-  6. FIX: Rank assigned after score sort
 """
 
 import asyncio
@@ -46,7 +43,7 @@ def allowed_file(filename: str) -> bool:
 async def push_to_supabase(rows: list, session_id: str, job_title: str):
     """Push scored results directly to Supabase hr_results table."""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        log.warning("Supabase not configured — skipping DB push")
+        log.warning("Supabase not configured — skipping DB push (set SUPABASE_URL and SUPABASE_KEY in .env)")
         return
 
     headers = {
@@ -59,7 +56,7 @@ async def push_to_supabase(rows: list, session_id: str, job_title: str):
     records = []
     for c in rows:
         score = float(c.get("Overall Fit Score", 0) or 0)
-        ats   = "Strong" if score >= 80 else ("Moderate" if score >= 60 else "Weak")
+        ats = "Strong" if score >= 80 else ("Moderate" if score >= 60 else "Weak")
         records.append({
             "session_id":     session_id,
             "job_title":      job_title,
@@ -82,51 +79,45 @@ async def push_to_supabase(rows: list, session_id: str, job_title: str):
 # ── Key remapping: snake_case → Title Case (what the HTML table expects) ──────
 
 FIELD_MAP = {
-    # snake_case from hr_scorer
-    "name":                              "Name",
-    "gender":                            "Gender",
-    "current_location":                  "Current Location",
-    "education":                         "Education",
-    "current_company":                   "Current Company",
-    "current_designation":               "Current Designation",
-    "current_employment_tenure":         "Current Employement Tenure",
-    "previous_employer":                 "Previous Employer",
-    "previous_designation":              "Previous Designation",
-    "previous_employment_tenure":        "Previous Employment Tenure",
-    "total_working_experience":          "Total Working Experience",
-    "relevance_experience":              "Relevance Experience",
-    "graduation":                        "Graduation",
-    "specialisation":                    "Specialisation",
-    "post_graduate":                     "Post Graduate",
-    "specialisation_pg":                 "Specialisation PG",
-    "key_skills":                        "Key Skills",
-    "overall_fit_score":                 "Overall Fit Score",
-    "similarity_score":                  "similarity_score",
-    "skill_similarity":                  "skill_similarity",
-    "applied_position":                  "applied_position",
-    "recommendation":                    "recommendation",
-    "required_experience_match":         "required_experience_match",
-    "skill_match_summary":               "skill_match_summary",
-    "education_certifications_match":    "education_certifications_match",
-    "soft_skills_traits":                "soft_skills_traits",
-    "strengths":                         "Strengths",
-    "concerns_or_gaps":                  "Concerns/Gaps",
-    "final_notes":                       "Final Notes",
-    "rank":                              "Rank",
-    "ats_rating":                        "ATS Rating",
-    # PascalCase from resume_parser (passed through hr_scorer unchanged)
-    "CurrentCompany":                    "Current Company",
-    "CurrentDesignation":                "Current Designation",
-    "CurrentEmploymentTenure":           "Current Employement Tenure",
-    "PreviousEmployer":                  "Previous Employer",
-    "PreviousDesignation":               "Previous Designation",
-    "PreviousEmploymentTenure":          "Previous Employment Tenure",
-    "TotalWorkingExperience":            "Total Working Experience",
-    "RelevantExperience":                "Relevance Experience",
-    "PostGraduate":                      "Post Graduate",
-    "SpecialisationPG":                  "Specialisation PG",
-    "KeySkills":                         "Key Skills",
-    "CurrentLocation":                   "Current Location",
+    "name":                         "Name",
+    "gender":                       "Gender",
+    "education":                    "Education",
+    "current_company":              "Current Company",
+    "current_designation":          "Current Designation",
+    "current_employment_tenure":    "Current Employement Tenure",
+    "previous_employer":            "Previous Employer",
+    "previous_designation":         "Previous Designation",
+    "previous_employment_tenure":   "Employement Tenure",
+    "total_working_experience":     "Total Working Experience",
+    "relevance_experience":         "Relevance Experience",
+    "graduation":                   "Graduation",
+    "specialisation":               "Specialisation",
+    "post_graduate":                "Post Graduate",
+    "specialisation_pg":            "Specialisation PG",
+    "key_skills":                   "Key Skills",
+    "overall_fit_score":            "Overall Fit Score",
+    "similarity_score":             "similarity_score",
+    "skill_similarity":             "skill_similarity",
+    "applied_position":             "applied_position",
+    "recommendation":               "recommendation",
+    "required_experience_match":    "required_experience_match",
+    "skill_match_summary":          "skill_match_summary",
+    "education_certifications_match": "education_certifications_match",
+    "soft_skills_traits":           "soft_skills_traits",
+    "strengths":                    "Strengths",
+    "concerns_or_gaps":             "Concerns/Gaps",
+    "final_notes":                  "Final Notes",
+    "CurrentCompany":               "Current Company",
+    "CurrentDesignation":           "Current Designation",
+    "CurrentEmploymentTenure":      "Current Employement Tenure",
+    "PreviousEmployer":             "Previous Employer",
+    "PreviousDesignation":          "Previous Designation",
+    "PreviousEmploymentTenure":     "Employement Tenure",
+    "TotalWorkingExperience":       "Total Working Experience",
+    "RelevantExperience":           "Relevance Experience",
+    "PostGraduate":                 "Post Graduate",
+    "SpecialisationPG":             "Specialisation PG",
+    "KeySkills":                    "Key Skills",
 }
 
 
@@ -143,6 +134,10 @@ def normalize_candidate(raw: dict) -> dict:
 # ── Fix for Windows Python 3.8 ───────────────────────────────────────────────
 
 def run_async(coro):
+    """
+    Safely run async coroutine from a Flask (sync) route on Windows Python 3.8.
+    Uses SelectorEventLoop to avoid ProactorEventLoop set_wakeup_fd crash.
+    """
     import sys
     result = {}
 
@@ -207,14 +202,14 @@ def analyze():
         tmpdir = Path(tmpdir)
 
         jd_filename = secure_filename(jd_file.filename)
-        jd_path     = tmpdir / jd_filename
+        jd_path = tmpdir / jd_filename
         jd_file.save(jd_path)
 
         resume_paths = []
         for rf in resume_files:
             if rf.filename and allowed_file(rf.filename):
-                fname  = secure_filename(rf.filename)
-                rpath  = tmpdir / fname
+                fname = secure_filename(rf.filename)
+                rpath = tmpdir / fname
                 rf.save(rpath)
                 resume_paths.append(rpath)
 
@@ -236,15 +231,12 @@ def analyze():
         reverse=True
     )
 
-    # Assign Rank + ensure score is 0-100 integer + compute ATS Rating
-    for rank_idx, c in enumerate(normalized, 1):
+    # Ensure score is always 0-100 integer
+    for c in normalized:
         raw = float(c.get('Overall Fit Score', 0) or 0)
         c['Overall Fit Score'] = round(raw if raw > 1 else raw * 100)
-        c['Rank']      = rank_idx
-        c['ATS Rating'] = "Strong" if c['Overall Fit Score'] >= 80 else (
-                          "Moderate" if c['Overall Fit Score'] >= 60 else "Weak")
 
-    # Push results to Supabase
+    # Push results directly to Supabase hr_results table
     session_id = f"sess_{int(datetime.now().timestamp() * 1000)}"
     job_title  = jd_file.filename
     try:
